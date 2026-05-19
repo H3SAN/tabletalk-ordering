@@ -1,0 +1,7 @@
+project_id = "hmwbtjhhnfuwkvwzzwog"
+
+[functions.parse-voice-order]
+verify_jwt = false
+
+[functions.notify-order-ready]
+verify_jwt = true
