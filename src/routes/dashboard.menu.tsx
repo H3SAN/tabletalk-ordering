@@ -37,6 +37,7 @@ type Item = {
   price: number;
   available: boolean;
   station: "kitchen" | "bar" | "dessert";
+  image_url: string | null;
 };
 type Modifier = { id: string; menu_item_id: string; name: string; price_delta: number };
 
@@ -116,6 +117,34 @@ function MenuPage() {
   async function deleteItem(id: string) {
     await supabase.from("menu_items").delete().eq("id", id);
     if (restaurantId) refresh(restaurantId);
+  }
+
+  async function uploadImage(it: Item, file: File) {
+    if (!restaurantId) return;
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error("Image must be under 5MB");
+      return;
+    }
+    const ext = file.name.split(".").pop()?.toLowerCase() || "jpg";
+    const path = `${restaurantId}/${it.id}-${Date.now()}.${ext}`;
+    const { error: upErr } = await supabase.storage
+      .from("menu-images")
+      .upload(path, file, { upsert: false, contentType: file.type });
+    if (upErr) return toast.error(upErr.message);
+    const { data: pub } = supabase.storage.from("menu-images").getPublicUrl(path);
+    const { error: updErr } = await supabase
+      .from("menu_items")
+      .update({ image_url: pub.publicUrl })
+      .eq("id", it.id);
+    if (updErr) return toast.error(updErr.message);
+    toast.success("Image uploaded");
+    refresh(restaurantId);
+  }
+
+  async function removeImage(it: Item) {
+    if (!restaurantId) return;
+    await supabase.from("menu_items").update({ image_url: null }).eq("id", it.id);
+    refresh(restaurantId);
   }
 
   async function addModifier(e: React.FormEvent) {
@@ -280,6 +309,46 @@ function MenuPage() {
                         </div>
                       </CardHeader>
                       <CardContent className="space-y-3">
+                        <div className="flex items-center gap-3">
+                          {i.image_url ? (
+                            <img
+                              src={i.image_url}
+                              alt={i.name}
+                              className="h-16 w-16 rounded-md object-cover"
+                            />
+                          ) : (
+                            <div className="flex h-16 w-16 items-center justify-center rounded-md border border-dashed text-[10px] text-muted-foreground">
+                              No image
+                            </div>
+                          )}
+                          <div className="flex flex-col gap-1">
+                            <label className="cursor-pointer">
+                              <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={(e) => {
+                                  const f = e.target.files?.[0];
+                                  if (f) uploadImage(i, f);
+                                  e.target.value = "";
+                                }}
+                              />
+                              <span className="inline-flex items-center rounded-md border bg-background px-2 py-1 text-xs hover:bg-accent">
+                                {i.image_url ? "Replace image" : "Upload image"}
+                              </span>
+                            </label>
+                            {i.image_url && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-6 justify-start px-2 text-xs"
+                                onClick={() => removeImage(i)}
+                              >
+                                Remove
+                              </Button>
+                            )}
+                          </div>
+                        </div>
                         <div className="flex items-center justify-between">
                           <Label className="flex items-center gap-2">
                             <Switch

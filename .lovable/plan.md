@@ -1,89 +1,79 @@
+## Deploy to Cloudflare Workers
 
-# Finish & stabilize: identified orders + recovery + notifications
+Your project is already configured for Cloudflare Workers (`wrangler.jsonc` exists, build target is set via `@lovable.dev/vite-tanstack-config`). You just need a Cloudflare account and a few CLI steps.
 
-## Goal
-Stop losing customer orders when they close the page. Every order is tied to a name + WhatsApp number. The customer can re-open the QR menu, type their name, and see all their active orders for that table. When staff marks an order ready, the customer is alerted three ways: in-page, browser push, and WhatsApp.
+### What you'll need
+- A free Cloudflare account (https://dash.cloudflare.com/sign-up)
+- The project running locally (cloned from GitHub via Lovable's GitHub integration)
+- Node + Bun installed locally
 
----
+### Step-by-step
 
-## 1. How "name-based recovery" actually works
+**1. Export the project to GitHub**
+In Lovable: top-right → GitHub → Connect → Create repository. Then clone it locally:
+```
+git clone <your-repo-url>
+cd <repo>
+bun install
+```
 
-A name alone is not unique ("John" twice in one café). The QR token already scopes a customer to a single **table at a single branch**, so we use:
+**2. Install & log in to Wrangler** (Cloudflare's CLI)
+```
+bun add -D wrangler
+bunx wrangler login
+```
+A browser window opens — authorize Cloudflare.
 
-> **`name` + `qr_token` (table) + recent window (last 4 hours)**
+**3. Build the app**
+```
+bun run build
+```
+This produces a Worker bundle that includes SSR + server functions + `/api/*` routes.
 
-Flow:
-- At checkout, we **require** name + WhatsApp number before placing the order. Both saved on the order row.
-- We also keep the existing `customer_session_id` in `localStorage` (so on the same device they get instant access — no re-typing).
-- If they switch device / clear storage / reopen later: the QR landing page (`/t/$qrToken`) shows a **"Find my orders"** button → modal asks for name → returns every order on this table from the last 4 hours matching that name (case-insensitive). One tap takes them to the existing tracking page.
-- WhatsApp number is also accepted as recovery key (more unique than name) — either field works.
+**4. Add your secrets to the Worker**
+The Worker needs the same env vars that Lovable Cloud injects automatically. Run each of these and paste the value when prompted:
+```
+bunx wrangler secret put SUPABASE_URL
+bunx wrangler secret put SUPABASE_PUBLISHABLE_KEY
+bunx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+bunx wrangler secret put VITE_SUPABASE_URL
+bunx wrangler secret put VITE_SUPABASE_PUBLISHABLE_KEY
+bunx wrangler secret put VITE_SUPABASE_PROJECT_ID
+bunx wrangler secret put LOVABLE_API_KEY
+```
+Values for the Supabase ones are already in your `.env`. `LOVABLE_API_KEY` you'll need to grab from Lovable (Cloud → Secrets) or replace AI calls with your own provider.
 
-This keeps it frictionless (no login, no SMS code) while making orders recoverable across sessions on the same table.
+**5. Deploy**
+```
+bunx wrangler deploy
+```
+Wrangler prints a URL like `https://tanstack-start-app.<your-subdomain>.workers.dev`. That's your live site.
 
-## 2. Database changes
+**6. (Optional) Custom domain**
+In the Cloudflare dashboard → Workers & Pages → your worker → Settings → Domains & Routes → Add custom domain. Cloudflare handles DNS + TLS automatically if the domain is on Cloudflare.
 
-Add to `orders`:
-- `customer_name text` (required, 1–80 chars, validated)
-- `customer_whatsapp text` (required, E.164 format, validated)
-- Index on `(branch_id, table_id, lower(customer_name), created_at)` for recovery lookups.
+### What still works
+- ✅ SSR, all routes, server functions (`createServerFn`)
+- ✅ Supabase database, auth, RLS (same project)
+- ✅ Customer name recovery, browser push notifications
+- ✅ Realtime order updates
 
-Update RLS / `anyone insert orders` check to require both fields are non-empty.
+### What needs extra work
+- **Supabase Edge Functions** (`parse-voice-order`, `notify-order-ready`, `assistant-chat`): these stay on Supabase's infrastructure, not Cloudflare. They keep working as-is — your Cloudflare-hosted frontend will call them at their `supabase.co/functions/v1/...` URLs. No action needed unless you want to migrate them to TanStack server routes later.
+- **Future code changes**: every change requires `bun run build && bunx wrangler deploy`. You lose Lovable's one-click publish on this domain. You can keep using Lovable to *edit* code (it syncs via GitHub) but you redeploy manually.
+- **Twilio / WhatsApp secret**: if/when you connect Twilio, add `TWILIO_API_KEY` and `TWILIO_WHATSAPP_FROM` via `wrangler secret put` too.
 
-New RPC `find_my_orders(_qr_token, _query)` — security definer, returns orders from the last 4 hours on that table where name OR whatsapp matches, with status + order_number.
+### Trade-off vs Lovable Publish
+| | Lovable Publish | Cloudflare Workers |
+|---|---|---|
+| Setup time | 0 min | ~15 min |
+| Auto-deploy on edit | ✅ | ❌ (manual `wrangler deploy`) |
+| Custom domain | ✅ | ✅ |
+| Cost | Included | Free tier: 100k requests/day |
+| Edge performance | Good | Excellent (300+ POPs) |
+| Control over infra | Low | Full |
 
-## 3. Checkout UI changes
+### Recommendation
+Unless you specifically need Cloudflare (edge performance, custom Workers logic, existing CF account/billing), **Lovable Publish is simpler** — same underlying tech, zero ops. Cloudflare makes sense if you want full infra control or are migrating off Lovable later.
 
-In `src/routes/t.$qrToken.tsx` cart/place-order step:
-- Add two required inputs above the "Place order" button: **Your name**, **WhatsApp number** (with country code helper).
-- Validate with zod (name 1–80, whatsapp E.164 regex).
-- Persist name + whatsapp in `localStorage` per QR token so they don't re-type for follow-up orders.
-
-## 4. Recovery UI
-
-On `/t/$qrToken` (menu page header):
-- If no active orders detected from `localStorage`, show subtle "Already ordered? Find my orders" link.
-- Opens a sheet with one input ("name or WhatsApp number"), calls `find_my_orders` RPC, lists results with order number, status badge, and an "Open" button → tracking page.
-
-## 5. Notifications when order is ready
-
-Three layers, all triggered by the existing status transition to `ready`:
-
-**a. In-page (already done)** — vibration + audio beep on the tracking page. Keep as-is.
-
-**b. Browser push notifications** (new)
-- On the tracking page, prompt for `Notification.requestPermission()` once after order is placed.
-- Subscribe to a Supabase realtime channel (already wired). When status flips to `ready`, fire `new Notification("Your order #123 is ready!", { body: ..., vibrate: [...] })`.
-- Pure client-side, no service worker needed for the foreground/background-tab case. Works on Android Chrome, desktop. iOS Safari requires PWA install — we'll show a small "Add to home screen for alerts" hint on iOS.
-
-**c. WhatsApp message** (new — uses Twilio connector)
-- A new server function `notifyOrderReady` is called by a database trigger (or by the kitchen UI's status update mutation) when status → `ready`.
-- It looks up `customer_whatsapp` and sends a WhatsApp template message via Twilio's `/Messages.json` endpoint (`From: whatsapp:+...`, `To: whatsapp:+<number>`, body: "Hi {name}, your order #{n} at {restaurant} is ready! 🍽️").
-- Requires the **Twilio connector** to be connected (uses connector gateway — no API key in code). User needs a Twilio WhatsApp sender (sandbox is fine for testing; production needs an approved sender).
-
-## 6. "Reach out to staff"
-Already exists — `Need help?` button on the tracking page inserts into `service_requests`. We'll surface the same button more prominently on the order list/recovery results, and add a "Call waiter" affordance on the menu page once an active order exists.
-
----
-
-## Technical changes (for reference)
-
-- **Migration**: alter `orders` (add columns + check constraints + index), update insert RLS, add `find_my_orders` RPC, add trigger `notify_on_ready` that calls a tiny pg_net HTTP call OR (simpler) have the kitchen UI call a server fn after the status update succeeds.
-- **Server fn** `src/lib/notifications.functions.ts`: `notifyOrderReady({ orderId })` — uses `supabaseAdmin` to read order + restaurant name, then calls Twilio gateway with `URLSearchParams`.
-- **Kitchen UI** (`src/routes/dashboard.kitchen.tsx`): after `advance(o)` updates status to `ready`, fire-and-forget `notifyOrderReady({ orderId: o.id })`.
-- **Customer pages**:
-  - `t.$qrToken.tsx`: add name/whatsapp form + zod validation + recovery sheet.
-  - `t.$qrToken.order.$orderId.tsx`: add `Notification.requestPermission()` and `new Notification(...)` on status=ready.
-- **Connector**: trigger `standard_connectors--connect` for **Twilio** before the WhatsApp piece works. Need to surface a clear message to the user: connect Twilio + provide WhatsApp sender number as a secret (`TWILIO_WHATSAPP_FROM`).
-
-## Order of work
-1. Migration: add columns, RPC, RLS update.
-2. Checkout form: required name + WhatsApp.
-3. Recovery sheet on QR menu page.
-4. Browser push notification on tracking page.
-5. Connect Twilio + add `TWILIO_WHATSAPP_FROM` secret.
-6. `notifyOrderReady` server fn + wire into kitchen status change.
-7. Test end-to-end.
-
-## What I need from you before starting step 5
-- Confirm you want me to walk you through connecting **Twilio** (free trial works for testing). We'll need: Twilio account, a WhatsApp-enabled sender number (sandbox is `+14155238886`).
-- For testing without Twilio you'll still get in-page + browser push notifications immediately after step 4.
+Want me to proceed with anything specific — e.g. prep a deployment checklist file in the repo, or just stick with Lovable Publish?

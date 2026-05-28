@@ -452,6 +452,14 @@ function CustomerOrderPage() {
                     onClick={() => i.available && openItem(i)}
                   >
                     <CardContent className="flex items-start justify-between gap-3 p-4">
+                      {i.image_url && (
+                        <img
+                          src={i.image_url}
+                          alt={i.name}
+                          loading="lazy"
+                          className="h-20 w-20 flex-shrink-0 rounded-md object-cover"
+                        />
+                      )}
                       <div className="flex-1">
                         <div className="font-medium">{i.name}</div>
                         {i.description && (
